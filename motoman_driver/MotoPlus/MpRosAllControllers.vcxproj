@@ -182,7 +182,9 @@
     <ClCompile Include="MotionServer.c" />
     <ClCompile Include="mpMain.c" />
     <ClCompile Include="SimpleMessage.c" />
+    <ClCompile Include="StateMachine.c" />
     <ClCompile Include="StateServer.c" />
+    <ClCompile Include="VelocityControl.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Controller.h" />
@@ -193,7 +195,9 @@
     <ClInclude Include="ParameterExtraction.h" />
     <ClInclude Include="ParameterTypes.h" />
     <ClInclude Include="SimpleMessage.h" />
+    <ClInclude Include="StateMachine.h" />
     <ClInclude Include="StateServer.h" />
+    <ClInclude Include="VelocityControl.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

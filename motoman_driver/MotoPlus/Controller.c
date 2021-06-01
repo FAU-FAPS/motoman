@@ -4,6 +4,7 @@
 * Software License Agreement (BSD License) 
 *
 * Copyright (c) 2013, Yaskawa America, Inc.
+* Copyright (c) 2021, Institute for Factory Automation and Production Systems (FAPS)
 * All rights reserved.
 *
 * Redistribution and use in binary form, with or without modification,
@@ -216,6 +217,12 @@ BOOL Ros_Controller_Init(Controller* controller)
 	controller->bSkillMotionReady[0] = FALSE;
 	controller->bSkillMotionReady[1] = FALSE;
 #endif
+
+	// Init velocity control (only for first control group)
+	VelocityControl_Init(&controller->velocityControl, controller->ctrlGroups[0], controller->interpolPeriod);
+
+	// Init state machine
+	StateMachine_Init(controller);
 
 	if(bInitOk)
 	{

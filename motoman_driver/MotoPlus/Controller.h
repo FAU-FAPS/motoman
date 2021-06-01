@@ -4,6 +4,7 @@
 * Software License Agreement (BSD License) 
 *
 * Copyright (c) 2013, Yaskawa America, Inc.
+* Copyright (c) 2021, Institute for Factory Automation and Production Systems (FAPS)
 * All rights reserved.
 *
 * Redistribution and use in binary form, with or without modification,
@@ -107,7 +108,10 @@ typedef enum
 #endif
 	IO_ROBOTSTATUS_MAX
 } IoStatusIndex;
- 
+
+// forward declaration of StateMachine
+typedef struct _StateMachine StateMachine;
+
 typedef struct
 {
 	UINT16 interpolPeriod;									// Interpolation period of the controller
@@ -138,6 +142,12 @@ typedef struct
 	int	sdMotionConnections[MAX_MOTION_CONNECTIONS];		// Socket Descriptor array for Motion Server
 	int	tidMotionConnections[MAX_MOTION_CONNECTIONS];  		// ThreadId array for Motion Server
 	int tidIncMoveThread;  									// ThreadId for sending the incremental move to the controller
+
+	// Velocity Control
+	VelocityControl velocityControl;
+
+	// State machine
+	StateMachine* stateMachine;
 
 #ifdef DX100
 	BOOL bSkillMotionReady[2];								// Boolean indicating that the SKILL command required for DX100 is active

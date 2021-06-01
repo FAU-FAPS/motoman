@@ -4,6 +4,7 @@
 * Software License Agreement (BSD License) 
 *
 * Copyright (c) 2013, Yaskawa America, Inc.
+* Copyright (c) 2021, Institute for Factory Automation and Production Systems (FAPS)
 * All rights reserved.
 *
 * Redistribution and use in binary form, with or without modification,
@@ -101,6 +102,10 @@ CtrlGroup* Ros_CtrlGroup_Create(int groupNo, BOOL bIsLastGrpToInit, float interp
 
 		status = GP_getFBPulseCorrection(groupNo, &ctrlGroup->correctionData);
 		if(status!=OK)
+			bInitOk = FALSE;
+
+		status = GP_getJointPulseLimits(groupNo, &ctrlGroup->jointPulseLimits);
+		if (status != OK)
 			bInitOk = FALSE;
 
 		status = GP_getMaxIncPerIpCycle(groupNo, interpolPeriod, &ctrlGroup->maxInc);

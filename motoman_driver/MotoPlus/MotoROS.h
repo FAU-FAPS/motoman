@@ -4,6 +4,7 @@
 * Software License Agreement (BSD License)
 *
 * Copyright (c) 2017, Yaskawa America, Inc.
+* Copyright (c) 2021, Institute for Factory Automation and Production Systems (FAPS)
 * All rights reserved.
 *
 * Redistribution and use in binary form, with or without modification,
@@ -38,7 +39,9 @@
 #include "ParameterExtraction.h"
 #include "CtrlGroup.h"
 #include "SimpleMessage.h"
+#include "VelocityControl.h"
 #include "Controller.h"
+#include "StateMachine.h"
 #include "IoServer.h"
 #include "MotionServer.h"
 #include "StateServer.h"

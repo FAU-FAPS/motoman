@@ -4,6 +4,7 @@
 * Software License Agreement (BSD License) 
 *
 * Copyright (c) 2013, Yaskawa America, Inc.
+* Copyright (c) 2021, Institute for Factory Automation and Production Systems (FAPS)
 * All rights reserved.
 *
 * Redistribution and use in binary form, with or without modification,
@@ -66,7 +67,7 @@ void Ros_StateServer_StartNewConnection(Controller* controller, int sd)
 			if(controller->tidStateSendState == INVALID_TASK)
 			{
 				//start task that will send the controller state
-				controller->tidStateSendState = mpCreateTask(MP_PRI_TIME_NORMAL, MP_STACK_SIZE, 
+				controller->tidStateSendState = mpCreateTask(MP_PRI_TIME_CRITICAL, MP_STACK_SIZE,
 											(FUNCPTR)Ros_StateServer_SendState,
 											(int)controller, 0, 0, 0, 0, 0, 0, 0, 0, 0);
 				
@@ -102,6 +103,9 @@ void Ros_StateServer_SendState(Controller* controller)
 	BOOL bOkToSendExFeedback;
 	BOOL bHasConnections;
 	BOOL bSuccesfulSend;
+	int counter = 0;
+	// Throttle for robot status message so that it's sent every ~100 ms
+	int statusThrottle = 100 / controller->interpolPeriod;
 	
 	printf("Starting State Server Send State task\r\n");
 	printf("Controller number of group = %d\r\n", controller->numGroup);
@@ -111,6 +115,9 @@ void Ros_StateServer_SendState(Controller* controller)
 	//Thread for state server should never terminate
 	while(TRUE)
 	{
+		// sync with motion control task
+		mpClkAnnounce(MP_INTERPOLATION_CLK);
+
 		Ros_SimpleMsg_JointFeedbackEx_Init(controller->numGroup, &sendMsgFEx);
 		bOkToSendExFeedback = TRUE;
 
@@ -141,13 +148,17 @@ void Ros_StateServer_SendState(Controller* controller)
 		if (bOkToSendExFeedback) //send extended-feedback message
 			Ros_StateServer_SendMsgToAllClient(controller, &sendMsgFEx, fexMsgSize);
 
-		// Send controller/robot status
-		msgSize = Ros_Controller_StatusToMsg(controller, &sendMsg);
-		if(msgSize > 0)
+		// Send controller/robot status <statusThrottle> times slower than joint feedback
+		counter++;
+		if (counter == statusThrottle)
 		{
-			Ros_StateServer_SendMsgToAllClient(controller, &sendMsg, msgSize);
+			msgSize = Ros_Controller_StatusToMsg(controller, &sendMsg);
+			if(msgSize > 0)
+			{
+				Ros_StateServer_SendMsgToAllClient(controller, &sendMsg, msgSize);
+			}
+			counter = 0;
 		}
-		Ros_Sleep(STATE_UPDATE_MIN_PERIOD);
 	}
 	
 	// Terminate this task

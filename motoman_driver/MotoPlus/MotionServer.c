@@ -4,6 +4,7 @@
 * Software License Agreement (BSD License) 
 *
 * Copyright (c) 2013, Yaskawa America, Inc.
+* Copyright (c) 2021, Institute for Factory Automation and Production Systems (FAPS)
 * All rights reserved.
 *
 * Redistribution and use in binary form, with or without modification,
@@ -55,6 +56,8 @@ int Ros_MotionServer_AddTrajPointFullEx(CtrlGroup* ctrlGroup, SmBodyJointTrajPtE
 int Ros_MotionServer_JointTrajPtFullExProcess(Controller* controller, SimpleMsg* receiveMsg, SimpleMsg* replyMsg);
 int Ros_MotionServer_GetDhParameters(Controller* controller, SimpleMsg* replyMsg);
 int Ros_MotionServer_SetSelectedTool(Controller* controller, SimpleMsg* receiveMsg, SimpleMsg* replyMsg);
+int Ros_MotionServer_VelocityConfigProcess(Controller* controller, SimpleMsg* receiveMsg, SimpleMsg* replyMsg);
+int Ros_MotionServer_VelocityCommandProcess(Controller* controller, SimpleMsg* receiveMsg, SimpleMsg* replyMsg);
 
 // AddToIncQueue Task:
 void Ros_MotionServer_AddToIncQueueProcess(Controller* controller, int groupNo);
@@ -63,12 +66,16 @@ BOOL Ros_MotionServer_AddPulseIncPointToQ(Controller* controller, int groupNo, I
 BOOL Ros_MotionServer_ClearQ_All(Controller* controller);
 BOOL Ros_MotionServer_HasDataInQueue(Controller* controller);
 int Ros_MotionServer_GetQueueCnt(Controller* controller, int groupNo);
+
+// Motion Control Task:
 void Ros_MotionServer_IncMoveLoopStart(Controller* controller);
+void Ros_MotionServer_VelocityControlLoop(Controller* controller);
 
 // Utility functions:
 void Ros_MotionServer_ConvertToJointMotionData(SmBodyJointTrajPtFull* jointTrajData, JointMotionData* jointMotionData);
 STATUS Ros_MotionServer_DisableEcoMode(Controller* controller);
 void Ros_MotionServer_PrintError(USHORT err_no, char* msgPrefix);
+void Ros_MotionServer_DumpInfo(Controller* controller, int groupNo);
 
 //-----------------------
 // Function implementation
@@ -104,28 +111,15 @@ void Ros_MotionServer_StartNewConnection(Controller* controller, int sd)
 	}
 	
 	// If not started, start the IncMoveTask (there should be only one instance of this thread)
-	if(controller->tidIncMoveThread == INVALID_TASK)
-	{
-		puts("Creating new task: IncMoveTask");
-		
-		controller->tidIncMoveThread = mpCreateTask(MP_PRI_IP_CLK_TAKE, MP_STACK_SIZE, 
-													(FUNCPTR)Ros_MotionServer_IncMoveLoopStart,
-													(int)controller, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-		if (controller->tidIncMoveThread == ERROR)
-		{
-			puts("Failed to create task for incremental-motion.  Check robot parameters.");
-			mpClose(sd);
-			controller->tidIncMoveThread = INVALID_TASK;
-			Ros_Controller_SetIOState(IO_FEEDBACK_FAILURE, TRUE);
-			mpSetAlarm(8004, "MOTOROS FAILED TO CREATE TASK", 4);
-
-			return;
-		}
-	}
+	// Let the state machine handle the starting/stopping of the appropriate motion control task
+	StateMachine_SendEvent(controller, SMACH_EVENT_CLIENT_CONNECTED);
 	
+
 	// If not started, start the AddToIncQueueProcess for each control group
 	for(groupNo = 0; groupNo < controller->numGroup; groupNo++)
 	{
+		Ros_MotionServer_DumpInfo(controller, groupNo);
+
 		if (controller->ctrlGroups[groupNo]->tidAddToIncQueue == INVALID_TASK)
 		{
 			printf("Creating new task: tidAddToIncQueue (groupNo = %d)\n", groupNo);
@@ -152,7 +146,7 @@ void Ros_MotionServer_StartNewConnection(Controller* controller, int sd)
 		
 			
 		//start new task for this specific connection
-		controller->tidMotionConnections[connectionIndex] = mpCreateTask(MP_PRI_TIME_NORMAL, MP_STACK_SIZE, 
+		controller->tidMotionConnections[connectionIndex] = mpCreateTask(MP_PRI_TIME_CRITICAL, MP_STACK_SIZE,
 																		(FUNCPTR)Ros_MotionServer_WaitForSimpleMsg,
 																		(int)controller, connectionIndex, 0, 0, 0, 0, 0, 0, 0, 0);
 	
@@ -201,7 +195,7 @@ void Ros_MotionServer_StopConnection(Controller* controller, int connectionIndex
 		}
 	}
 	
-	// If there is no more connection, stop the inc_move task
+	// If there is no more connection, stop the motion control task
 	if(bDeleteIncMovTask)
 	{
 		//set feedback signal
@@ -216,10 +210,8 @@ void Ros_MotionServer_StopConnection(Controller* controller, int connectionIndex
 			mpDeleteTask(tid);
 		}
 		
-		// terminate the inc_move task
-		tid = controller->tidIncMoveThread;
-		controller->tidIncMoveThread = INVALID_TASK;
-		mpDeleteTask(tid);
+		// Let the state machine handle the starting/stopping of the appropriate motion control task
+		StateMachine_SendEvent(controller, SMACH_EVENT_CLIENT_DISCONNECTED);
 	}
 		
 	// Stop message receiption task
@@ -282,6 +274,11 @@ int Ros_MotionServer_GetExpectedByteSizeForMessageType(SimpleMsg* receiveMsg, in
 		break;
 	case ROS_MSG_MOTO_SELECT_TOOL:
 		expectedSize = minSize + sizeof(SmBodySelectTool);
+	case ROS_MSG_MOTO_VELOCITY_CONFIG:
+		expectedSize = minSize + sizeof(SmBodyMotoVelocityConfig);
+		break;
+	case ROS_MSG_MOTO_VELOCITY_COMMAND:
+		expectedSize = minSize + sizeof(SmBodyMotoVelocityCommand);
 		break;
 	default: //invalid message type
 		return -1;
@@ -306,8 +303,6 @@ void Ros_MotionServer_WaitForSimpleMsg(Controller* controller, int connectionInd
 
 	while(!bDisconnect) //keep accepting messages until connection closes
 	{
-		Ros_Sleep(0);	//give it some time to breathe, if needed
-		
 		if (!bSkipNetworkRecv)
 		{
 			if (partialMsgByteCount) //partial (incomplete) message already received
@@ -339,7 +334,7 @@ void Ros_MotionServer_WaitForSimpleMsg(Controller* controller, int connectionInd
 
 		// Determine the expected size of the message
 		expectedSize = -1;
-		if(byteSize >= minSize)
+		if (byteSize >= minSize)
 		{
 			expectedSize = Ros_MotionServer_GetExpectedByteSizeForMessageType(&receiveMsg, byteSize);
 
@@ -347,7 +342,7 @@ void Ros_MotionServer_WaitForSimpleMsg(Controller* controller, int connectionInd
 			{
 				printf("Unknown Message Received (%d)\r\n", receiveMsg.header.msgType);
 				Ros_SimpleMsg_MotionReply(&receiveMsg, ROS_RESULT_INVALID, ROS_RESULT_INVALID_MSGTYPE, &replyMsg, 0);
-			}			
+			}
 			else if (byteSize >= expectedSize) // Check message size
 			{
 				// Process the simple message
@@ -399,6 +394,9 @@ void Ros_MotionServer_WaitForSimpleMsg(Controller* controller, int connectionInd
 		byteSizeResponse = mpSend(controller->sdMotionConnections[connectionIndex], (char*)(&replyMsg), replyMsg.prefix.length + sizeof(SmPrefix), 0);
 		if (byteSizeResponse <= 0)
 			break;	// Close the connection
+
+		// sequence task
+		Ros_Sleep(0);
 	}
 	
 	Ros_Sleep(50);	// Just in case other associated task need time to clean-up.
@@ -463,6 +461,15 @@ int Ros_MotionServer_SimpleMsgProcess(Controller* controller, SimpleMsg* receive
 	//-----------------------
 	case ROS_MSG_MOTO_SELECT_TOOL:
 		ret = Ros_MotionServer_SetSelectedTool(controller, receiveMsg, replyMsg);
+	
+	//-----------------------
+	case ROS_MSG_MOTO_VELOCITY_CONFIG:
+		ret = Ros_MotionServer_VelocityConfigProcess(controller, receiveMsg, replyMsg);
+		break;
+
+	//-----------------------
+	case ROS_MSG_MOTO_VELOCITY_COMMAND:
+		ret = Ros_MotionServer_VelocityCommandProcess(controller, receiveMsg, replyMsg);
 		break;
 
 	//-----------------------
@@ -490,10 +497,11 @@ int Ros_MotionServer_SimpleMsgProcess(Controller* controller, SimpleMsg* receive
 int Ros_MotionServer_JointTrajPtFullExProcess(Controller* controller, SimpleMsg* receiveMsg, 
 											  SimpleMsg* replyMsg)
 {
-	SmBodyJointTrajPtFullEx* msgBody;	
+	SmBodyJointTrajPtFullEx* msgBody;
 	CtrlGroup* ctrlGroup;
 	int ret, i;
 	FlagsValidFields validationFlags;
+	BOOL setSmachEvent;
 
 	msgBody = &receiveMsg->body.jointTrajDataEx;
 
@@ -538,6 +546,8 @@ int Ros_MotionServer_JointTrajPtFullExProcess(Controller* controller, SimpleMsg*
 		}
 	}
 
+	setSmachEvent = FALSE;
+
 	for (i = 0; i < msgBody->numberOfValidGroups; i += 1)
 	{
 		ctrlGroup = controller->ctrlGroups[msgBody->jointTrajPtData[i].groupNo];
@@ -549,8 +559,17 @@ int Ros_MotionServer_JointTrajPtFullExProcess(Controller* controller, SimpleMsg*
 			ret = Ros_MotionServer_InitTrajPointFullEx(ctrlGroup, &msgBody->jointTrajPtData[i], msgBody->sequence);
 		
 			// set reply
-			if(ret == 0)
+			if (ret == 0)
+			{
 				Ros_SimpleMsg_MotionReply(receiveMsg, ROS_RESULT_SUCCESS, 0, replyMsg, msgBody->jointTrajPtData[i].groupNo);
+
+				// send state machine "event" (only once)
+				if (!setSmachEvent)
+				{
+					StateMachine_SendEvent(controller, SMACH_EVENT_JOINT_TRAJECTORY_START);
+					setSmachEvent = TRUE;
+				}
+			}
 			else
 			{
 				printf("ERROR: Ros_MotionServer_InitTrajPointFullEx returned %d\n", ret);
@@ -719,9 +738,18 @@ BOOL Ros_MotionServer_StopMotion(Controller* controller)
 	for(checkCnt=0; checkCnt<MOTION_STOP_TIMEOUT; checkCnt++) 
 	{
 		bStopped = TRUE;
-		for(groupNo=0; groupNo<controller->numGroup; groupNo++)
-			bStopped &= !controller->ctrlGroups[groupNo]->hasDataToProcess;
-		if(bStopped)
+
+		if (controller->stateMachine->motionCtrlMode == MOTION_CTRL_MODE_JOINT_TRAJECTORY_STREAMING)
+		{
+			for(groupNo=0; groupNo<controller->numGroup; groupNo++)
+				bStopped &= !controller->ctrlGroups[groupNo]->hasDataToProcess;
+		}
+		else if (controller->stateMachine->motionCtrlMode == MOTION_CTRL_MODE_VELOCITY_CONTROL)
+		{
+			bStopped = controller->velocityControl.isStopped;
+		}
+
+		if (bStopped)
 			break;
 		else
 			Ros_Sleep(1);
@@ -730,7 +758,7 @@ BOOL Ros_MotionServer_StopMotion(Controller* controller)
 	// Clear queues
 	bRet = Ros_MotionServer_ClearQ_All(controller);
 	
-	// All motion should be stopped at this point, so turn of the flag
+	// All motion should be stopped at this point, so turn off the flag
 	controller->bStopMotion = FALSE;
 	
 	return(bStopped && bRet);
@@ -1105,8 +1133,13 @@ int Ros_MotionServer_JointTrajDataProcess(Controller* controller, SimpleMsg* rec
 		ret = Ros_MotionServer_InitTrajPointFull(ctrlGroup, trajData);
 		
 		// set reply
-		if(ret == 0)
+		if (ret == 0)
+		{
 			Ros_SimpleMsg_MotionReply(receiveMsg, ROS_RESULT_SUCCESS, 0, replyMsg, receiveMsg->body.jointTrajData.groupNo);
+
+			// send state machine "event"
+			StateMachine_SendEvent(controller, SMACH_EVENT_JOINT_TRAJECTORY_START);
+		}
 		else
 			Ros_SimpleMsg_MotionReply(receiveMsg, ROS_RESULT_INVALID, ret, replyMsg, receiveMsg->body.jointTrajData.groupNo);
 	}
@@ -1214,6 +1247,7 @@ int Ros_MotionServer_InitTrajPointFull(CtrlGroup* ctrlGroup, SmBodyJointTrajPtFu
 		}		
 
 		//printf("Trajectory Start Initialized\r\n");
+
 		// Return success
 		return 0;
 	}
@@ -1304,11 +1338,19 @@ void Ros_MotionServer_AddToIncQueueProcess(Controller* controller, int groupNo)
 
 	FOREVER
 	{
-		// if there is no message to process delay and try agsain
-		if(ctrlGroup->hasDataToProcess)
+		// if there is no message to process delay and try again
+		if (ctrlGroup->hasDataToProcess)
 		{
-			// Interpolate increment move to reach position data
-			Ros_MotionServer_JointTrajDataToIncQueue(controller, groupNo);
+			// process joint trajectory data while in JOINT_TRAJECTORY_STREAMING mode only
+			if (controller->stateMachine->motionCtrlMode == MOTION_CTRL_MODE_JOINT_TRAJECTORY_STREAMING)
+			{
+				// Interpolate increment move to reach position data
+				Ros_MotionServer_JointTrajDataToIncQueue(controller, groupNo);
+			}
+			else
+			{
+				printf("[motion_server] Warning: Attempted to add data to the inc move queue while not in JOINT_TRAJECTORY_STREAMING mode\r\n");
+			}
 			
 			// Mark message as processed 
 			ctrlGroup->hasDataToProcess = FALSE;
@@ -1641,7 +1683,7 @@ void Ros_MotionServer_IncMoveLoopStart(Controller* controller) //<-- IP_CLK prio
 	{
 		mpClkAnnounce(MP_INTERPOLATION_CLK);
 		
-		if (Ros_Controller_IsMotionReady(controller) 
+		if (Ros_Controller_IsMotionReady(controller)
 			&& Ros_MotionServer_HasDataInQueue(controller) 
 			&& !controller->bStopMotion)
 		{
@@ -1780,6 +1822,96 @@ void Ros_MotionServer_IncMoveLoopStart(Controller* controller) //<-- IP_CLK prio
 }
 
 
+//---------------------------------------------------------------------------
+// Task to move the robot at each interpolation increment (Velocity Control)
+// - DX100 not supported
+// - Only for first control group (R1)
+//---------------------------------------------------------------------------
+void Ros_MotionServer_VelocityControlLoop(Controller* controller) //<-- IP_CLK priority task
+{
+	printf("[velocity_control_loop] Motion control task started\r\n");
+	int ret;                 // return value of mpExRcsIncrementMove
+	STATUS status;           // indicator if the actual command could be obtained and converted successfully
+	VelocityCommand velCmd;  // actual velocity command to execute
+
+	// pointer reference to velocity control
+	VelocityControl* velCtrl = &controller->velocityControl;
+
+	// init the incremental move data
+	MP_EXPOS_DATA moveData;
+	memset(&moveData, 0x00, sizeof(moveData));
+	moveData.ctrl_grp = 1;
+	moveData.grp_pos_info[0].pos_tag.data[0] = Ros_CtrlGroup_GetAxisConfig(controller->ctrlGroups[0]);
+
+	FOREVER
+	{
+		mpClkAnnounce(MP_INTERPOLATION_CLK);
+
+		if (Ros_Controller_IsMotionReady(controller) && !controller->bStopMotion)
+		{
+			status = OK;
+			velCtrl->isStopped = FALSE;
+
+			if (mpSemTake(velCtrl->lock, VEL_CTRL_LOCK_TIMEOUT) == OK)
+			{
+				// get the actual velocity command
+				VelocityControl_PopCommand(velCtrl, &velCmd);
+
+				// convert velocity command into increment
+				if (!VelocityControl_ConvertToIncPosInfo(velCtrl, &velCmd, &moveData.grp_pos_info[0]))
+				{
+					printf("[velocity_control_loop] Error: Failed to convert velocity command into increment position info\r\n");
+					status = ERROR;
+				}
+
+				// unlock
+				mpSemGive(velCtrl->lock);
+			}
+			else
+			{
+				printf("[velocity_control_loop] Error: Failed to get velocity command. The velocity control data is locked up\r\n");
+				status = ERROR;
+			}
+
+			// force immediate stop on error
+			if (status != OK)
+			{
+				moveData.grp_pos_info[0].pos_tag.data[2] = 0;
+				moveData.grp_pos_info[0].pos_tag.data[3] = MP_INC_PULSE_DTYPE;
+				moveData.grp_pos_info[0].pos_tag.data[4] = 0;
+				memset(&moveData.grp_pos_info[0].pos, 0x00, sizeof(LONG) * MP_GRP_AXES_NUM);
+			}
+
+			ret = mpExRcsIncrementMove(&moveData);
+			if (ret != 0)
+			{
+				if (ret == -3)
+					printf("[velocity_control_loop] mpExRcsIncrementMove returned: %d (ctrl_grp = %d)\r\n", ret, moveData.ctrl_grp);
+				else
+					printf("[velocity_control_loop] mpExRcsIncrementMove returned: %d\r\n", ret);
+			}
+		}
+		else
+		{
+			if (!velCtrl->isStopped)
+			{
+				if (mpSemTake(velCtrl->lock, VEL_CTRL_LOCK_TIMEOUT) == OK)
+				{
+					VelocityControl_Reset(velCtrl);
+					velCtrl->isStopped = TRUE;
+					printf("[velocity_control_loop] Reset motion (IsMotionReady=%d, bStopMotion=%d)\r\n",
+						Ros_Controller_IsMotionReady(controller), controller->bStopMotion);
+					mpSemGive(velCtrl->lock);
+				}
+				else
+				{
+					printf("[velocity_control_loop] Error: Failed to reset motion. The velocity control data is locked up\r\n");
+				}
+			}
+		}
+	}
+}
+
 
 //-----------------------------------------------------------------------
 // Convert a JointTrajData message to a JointMotionData of a control group
@@ -1908,4 +2040,204 @@ int Ros_MotionServer_SetSelectedTool(Controller* controller, SimpleMsg* receiveM
 		Ros_SimpleMsg_MotionReply(receiveMsg, ROS_RESULT_INVALID, ROS_RESULT_INVALID_GROUPNO, replyMsg, groupNo);
 
 	return 0;
+}
+
+int Ros_MotionServer_VelocityConfigProcess(Controller* controller, SimpleMsg* receiveMsg, SimpleMsg* replyMsg)
+{
+	STATUS status = OK;
+	SmBodyMotoVelocityConfig* smVelCfg = &receiveMsg->body.velocityConfig;
+	VelocityControl* velCtrl = &controller->velocityControl;
+
+	if (mpSemTake(velCtrl->lock, VEL_CTRL_LOCK_TIMEOUT) == OK)
+	{
+		velCtrl->maxLinearVel = smVelCfg->linVel;
+		velCtrl->maxAngularVel = smVelCfg->angVel;
+		velCtrl->maxLinearDeltaVel = smVelCfg->linAccel * controller->interpolPeriod * 1e-3;
+		velCtrl->maxAngularDeltaVel = smVelCfg->angAccel * controller->interpolPeriod * 1e-3;
+		velCtrl->toolFileNum = smVelCfg->toolFileNum;
+		velCtrl->userCoordNum = smVelCfg->userCoordNum;
+		velCtrl->commandType = (MotoVelocityCmdType)smVelCfg->cmdType;
+
+		// resize filter if necessary
+		VelocityControl_SetFilterSize(velCtrl, smVelCfg->filterSize);
+
+		// reset all command data (avoid remaining garbage data)
+		VelocityControl_Reset(velCtrl);
+
+		// send state machine "event"
+		StateMachine_SendEvent(controller, SMACH_EVENT_VELOCITY_CONFIG);
+
+		// unlock
+		mpSemGive(velCtrl->lock);
+	}
+	else
+	{
+		printf("[motion_server] Error: Failed to process velocity config message. The velocity control data is locked up.\r\n");
+		status = ERROR;
+	}
+
+	//----------------------------------
+	// init reply message
+	//----------------------------------
+
+	// initialize memory
+	memset(replyMsg, 0x00, sizeof(SimpleMsg));
+
+	// set prefix: length of message excluding the prefix
+	replyMsg->prefix.length = sizeof(SmHeader) + sizeof(SmBodyMotoVelocityConfig);
+
+	// set header information of the reply
+	replyMsg->header.msgType = ROS_MSG_MOTO_VELOCITY_CONFIG;
+	replyMsg->header.commType = ROS_COMM_SERVICE_REPLY;
+	replyMsg->header.replyType = (status == OK) ? ROS_REPLY_SUCCESS : ROS_REPLY_FAILURE;
+
+	return status;
+}
+
+int Ros_MotionServer_VelocityCommandProcess(Controller* controller, SimpleMsg* receiveMsg, SimpleMsg* replyMsg)
+{
+	static int throttle = 0;
+	STATUS status = OK;
+	SmBodyMotoVelocityCommand* smVelCmd = &receiveMsg->body.velocityCommand;
+	VelocityControl* velCtrl = &controller->velocityControl;
+	VelocityCommand recvCmd;
+
+	// init velocity command
+	memset(&recvCmd, 0x00, sizeof(VelocityCommand));
+
+	// process command while in VELOCITY_CONTROL mode only
+	if (controller->stateMachine->motionCtrlMode == MOTION_CTRL_MODE_VELOCITY_CONTROL)
+	{
+		// check for special sequence number (stop motion)
+		if (smVelCmd->sequence == VEL_CTRL_SPECIAL_SEQ_STOP_MOTION)
+		{
+			status = Ros_MotionServer_StopMotion(controller) ? OK : ERROR;
+		}
+		else
+		{
+			if (mpSemTake(velCtrl->lock, VEL_CTRL_LOCK_TIMEOUT) == OK)
+			{
+				// check if command type matches with the configured command type
+				if (smVelCmd->type == velCtrl->commandType)
+				{
+					// copy velocity command data
+					recvCmd.sequence = smVelCmd->sequence;
+					memcpy(recvCmd.vector, smVelCmd->vector, sizeof(float) * ROS_MAX_JOINT);
+
+					// push command
+					if (!VelocityControl_PushCommand(velCtrl, &recvCmd))
+					{
+						printf("[motion_server] Error: Failed to push velocity command\r\n");
+						status = ERROR;
+					}
+				}
+				else
+				{
+					printf("[motion_server] Error: Velocity command type (%d) does not match with the configured type (%d)\r\n",
+						smVelCmd->type, velCtrl->commandType);
+					status = ERROR;
+				}
+
+				// unlock
+				mpSemGive(velCtrl->lock);
+			}
+			else
+			{
+				printf("[motion_server] Error: Failed to process velocity command message. The velocity control data is locked up.\r\n");
+				status = ERROR;
+			}
+		}
+
+		throttle = 0;
+	}
+	else
+	{
+		// no error, just ignoring command if not in VELOCITY_CONTROL mode
+		if (throttle == 0)
+			printf("[motion_server] Warning: Velocity command received while not in VELOCITY_CONTROL mode (ignoring)\r\n");
+
+		throttle = (throttle + 1) % 250;
+	}
+
+	//----------------------------------
+	// init reply message
+	//----------------------------------
+
+	// initialize memory
+	memset(replyMsg, 0x00, sizeof(SimpleMsg));
+
+	// set prefix: length of message excluding the prefix
+	replyMsg->prefix.length = sizeof(SmHeader) + sizeof(SmBodyMotoVelocityCommand);
+
+	// set header information of the reply
+	replyMsg->header.msgType = ROS_MSG_MOTO_VELOCITY_COMMAND;
+	replyMsg->header.commType = ROS_COMM_SERVICE_REPLY;
+	replyMsg->header.replyType = (status == OK) ? ROS_REPLY_SUCCESS : ROS_REPLY_FAILURE;
+
+	return status;
+}
+
+void Ros_MotionServer_DumpInfo(Controller* controller, int groupNo)
+{
+	int i;
+	CtrlGroup* ctrlGroup = controller->ctrlGroups[groupNo];
+
+	printf("axisType[%d]: ", groupNo);
+	for (i = 0; i < MP_GRP_AXES_NUM; i++)
+	{
+		if (ctrlGroup->axisType.type[i] == AXIS_LINEAR)
+			printf("Lin\t");
+		else if (ctrlGroup->axisType.type[i] == AXIS_ROTATION)
+			printf("Rot\t");
+		else
+		{
+			printf("---\t");
+			//motoRosAssert(FALSE, SUBCODE_INVALID_AXIS_TYPE, "Grp%d Axs%d type invalid", groupNo, i);
+		}
+	}
+	printf(";\r\n");
+
+	printf("pulse->unit[%d]: ", groupNo);
+	for (i = 0; i < MP_GRP_AXES_NUM; i++)
+	{
+		if (ctrlGroup->axisType.type[i] == AXIS_LINEAR)
+			printf("%.4f\t", ctrlGroup->pulseToMeter.PtoM[i]);
+		else if (ctrlGroup->axisType.type[i] == AXIS_ROTATION)
+			printf("%.4f\t", ctrlGroup->pulseToRad.PtoR[i]);
+		else
+			printf("--\t");
+	}
+	printf(";\r\n");
+
+	printf("maxInc[%d] (in motoman joint order): %d, %d, %d, %d, %d, %d, %d\r\n",
+		groupNo,
+		ctrlGroup->maxInc.maxIncrement[0], ctrlGroup->maxInc.maxIncrement[1], ctrlGroup->maxInc.maxIncrement[2],
+		ctrlGroup->maxInc.maxIncrement[3], ctrlGroup->maxInc.maxIncrement[4], ctrlGroup->maxInc.maxIncrement[5],
+		ctrlGroup->maxInc.maxIncrement[6]);
+
+	printf("maxSpeed[%d] (in ros joint order): %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f\r\n",
+		groupNo,
+		ctrlGroup->maxSpeed[0], ctrlGroup->maxSpeed[1], ctrlGroup->maxSpeed[2],
+		ctrlGroup->maxSpeed[3], ctrlGroup->maxSpeed[4], ctrlGroup->maxSpeed[5],
+		ctrlGroup->maxSpeed[6]);
+
+	printf("minPulseLimit[%d] (in motoman joint order): %d, %d, %d, %d, %d, %d, %d\r\n",
+		groupNo,
+		ctrlGroup->jointPulseLimits.minLimit[0],
+		ctrlGroup->jointPulseLimits.minLimit[1],
+		ctrlGroup->jointPulseLimits.minLimit[2],
+		ctrlGroup->jointPulseLimits.minLimit[3],
+		ctrlGroup->jointPulseLimits.minLimit[4],
+		ctrlGroup->jointPulseLimits.minLimit[5],
+		ctrlGroup->jointPulseLimits.minLimit[6]);
+
+	printf("maxPulseLimit[%d] (in motoman joint order): %d, %d, %d, %d, %d, %d, %d\r\n",
+		groupNo,
+		ctrlGroup->jointPulseLimits.maxLimit[0],
+		ctrlGroup->jointPulseLimits.maxLimit[1],
+		ctrlGroup->jointPulseLimits.maxLimit[2],
+		ctrlGroup->jointPulseLimits.maxLimit[3],
+		ctrlGroup->jointPulseLimits.maxLimit[4],
+		ctrlGroup->jointPulseLimits.maxLimit[5],
+		ctrlGroup->jointPulseLimits.maxLimit[6]);
 }

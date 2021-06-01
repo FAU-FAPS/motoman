@@ -4,6 +4,7 @@
 * Software License Agreement (BSD License) 
 *
 * Copyright (c) 2013, Yaskawa America, Inc.
+* Copyright (c) 2021, Institute for Factory Automation and Production Systems (FAPS)
 * All rights reserved.
 *
 * Redistribution and use in binary form, with or without modification,
@@ -76,7 +77,10 @@ typedef enum
 	ROS_MSG_MOTO_JOINT_FEEDBACK_EX = 2017,
 	ROS_MSG_MOTO_SELECT_TOOL = 2018,
 
-	ROS_MSG_MOTO_GET_DH_PARAMETERS = 2020
+	ROS_MSG_MOTO_GET_DH_PARAMETERS = 2020,
+
+	ROS_MSG_MOTO_VELOCITY_CONFIG = 2040,
+	ROS_MSG_MOTO_VELOCITY_COMMAND = 2041
 } SmMsgType;
 
 
@@ -383,6 +387,41 @@ struct _SmBodyMotoGetDhParameters
 } __attribute__((__packed__));
 typedef struct _SmBodyMotoGetDhParameters SmBodyMotoGetDhParameters;
 
+//------------------
+// Velocity Control
+//------------------
+
+typedef enum
+{
+	VELOCITY_CMD_TYPE_UNDEFINED   = 0,
+	VELOCITY_CMD_TYPE_JOINT       = 1,
+	VELOCITY_CMD_TYPE_BASE_FRAME  = 2,
+	VELOCITY_CMD_TYPE_ROBOT_FRAME = 3,
+	VELOCITY_CMD_TYPE_TOOL_FRAME  = 4
+} MotoVelocityCmdType;
+
+struct _SmBodyMotoVelocityConfig
+{
+	int cmdType;        // Velocity command type (see MotoVelocityCmdType)
+	int userCoordNum;   // User coordinate number (for MP_POS_TAG.data[4])
+	int toolFileNum;    // Tool file number (for MP_POS_TAG.data[2])
+	int filterSize;     // Size of moving average filter
+	float linVel;       // Maximum cartesian linear velocity in m/s
+	float angVel;       // Maximum cartesian angular velocity in rad/s
+	float linAccel;     // Maximum cartesian linear acceleration in m/s^2
+	float angAccel;     // Maximum cartesian angular acceleration in rad/s^2
+} __attribute__((__packed__));
+typedef struct _SmBodyMotoVelocityConfig SmBodyMotoVelocityConfig;
+
+struct _SmBodyMotoVelocityCommand
+{
+	int groupNo;                  // Control group number (unused, velocity control is available only for the first control group)
+	int sequence;                 // Sequence number for velocity command stream
+	int type;                     // Velocity command type (see MotoVelocityCmdType)
+	float vector[ROS_MAX_JOINT];  // Desired velocities in m/s or rad/s
+} __attribute__((__packed__));
+typedef struct _SmBodyMotoVelocityCommand SmBodyMotoVelocityCommand;
+
 //--------------
 // Body Union
 //--------------
@@ -411,6 +450,8 @@ typedef union
 	SmBodyMotoReadIOMRegisterReply readRegisterReply;
 	SmBodyMotoWriteIOMRegister writeRegister;
 	SmBodyMotoWriteIOMRegisterReply writeRegisterReply;
+	SmBodyMotoVelocityConfig velocityConfig;
+	SmBodyMotoVelocityCommand velocityCommand;
 } SmBody;
 
 //-------------------

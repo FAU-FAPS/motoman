@@ -4,6 +4,7 @@
 * Software License Agreement (BSD License) 
 *
 * Copyright (c) 2013, Yaskawa America, Inc.
+* Copyright (c) 2021, Institute for Factory Automation and Production Systems (FAPS)
 * All rights reserved.
 *
 * Redistribution and use in binary form, with or without modification,
@@ -85,6 +86,7 @@ typedef struct
 	PULSE_TO_RAD pulseToRad;					// conversion ratio between pulse and radian
 	PULSE_TO_METER pulseToMeter;				// conversion ratio between pulse and meter (linear axis)
 	FB_PULSE_CORRECTION_DATA correctionData;	// compensation for axes coupling
+	JOINT_PULSE_LIMITS jointPulseLimits;        // joint pulse limits
 	MAX_INCREMENT_INFO maxInc;					// maximum increment per interpolation cycle
 	float maxSpeed[MP_GRP_AXES_NUM];			// maximum joint speed in radian/sec (rotational) or meter/sec (linear)
 	int tool;									// selected tool for the motion				

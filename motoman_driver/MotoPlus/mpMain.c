@@ -14,6 +14,7 @@
 * Software License Agreement (BSD License) 
 *
 * Copyright (c) 2013, Yaskawa America, Inc.
+* Copyright (c) 2021, Institute for Factory Automation and Production Systems (FAPS)
 * All rights reserved.
 *
 * Redistribution and use in binary form, with or without modification,
@@ -82,13 +83,22 @@ void RosInitTask()
 		return;
 	}
 
-	ros_controller.tidConnectionSrv = mpCreateTask(MP_PRI_TIME_NORMAL, MP_STACK_SIZE, 
-						(FUNCPTR)Ros_Controller_ConnectionServer_Start,
-						(int)&ros_controller, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-	
+	ros_controller.tidConnectionSrv = mpCreateTask(MP_PRI_TIME_NORMAL, MP_STACK_SIZE,
+		(FUNCPTR)Ros_Controller_ConnectionServer_Start,
+		(int)&ros_controller, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+
 	if(ros_controller.tidConnectionSrv == ERROR)
 		mpSetAlarm(8004, "MOTOROS FAILED TO CREATE TASK", 2);
-		
+
+	// start state machine task
+	int tid = mpCreateTask(MP_PRI_TIME_CRITICAL, MP_STACK_SIZE,
+		(FUNCPTR)StateMachine_Loop,
+		(int)&ros_controller, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+
+	if (tid == ERROR)
+		mpSetAlarm(8004, "MOTOROS FAILED TO CREATE TASK", 2);
+
+
 #ifdef DX100
 	// DX100 need to execute a SKILLSEND command prior to the WAIT in order for the 
 	// incremental motion function to work.  These tasks monitor for those commands
