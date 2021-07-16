@@ -38,12 +38,12 @@
 #define METER_TO_INC 1e6
 
 // Default values
-#define VEL_CTRL_FILTER_SIZE       10                  // Size of moving average filter
+#define VEL_CTRL_FILTER_SIZE       0                  // Size of moving average filter
 #define VEL_CTRL_MEMORY_SIZE       3                   // Size of memory buffer for storing the last executed velocity commands
 #define VEL_CTRL_MAX_LINEAR_VEL    0.250               // Maximum linear velocity in m/s
 #define VEL_CTRL_MAX_LINEAR_ACCEL  5.0                 // Maximum linear acceleration in m/s^2
-#define VEL_CTRL_MAX_ANGULAR_VEL   (60 * DEG_TO_RAD)   // Maximum angular velocity in rad/s
-#define VEL_CTRL_MAX_ANGULAR_ACCEL (180 * DEG_TO_RAD)  // Maximum angular acceleration in rad/s^2
+#define VEL_CTRL_MAX_ANGULAR_VEL   (150 * DEG_TO_RAD)   // Maximum angular velocity in rad/s
+#define VEL_CTRL_MAX_ANGULAR_ACCEL (300 * DEG_TO_RAD)  // Maximum angular acceleration in rad/s^2
 
 // Special sequence number
 #define VEL_CTRL_SPECIAL_SEQ_STOP_MOTION -1
